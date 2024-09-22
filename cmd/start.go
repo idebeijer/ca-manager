@@ -23,9 +23,7 @@ var validTokens = map[string]bool{
 }
 
 type CertRequest struct {
-	CommonName   string   `json:"common_name"`
-	Organization []string `json:"organization"`
-	// Add additional fields as needed
+	CSR string `json:"csr"` // The CSR in PEM format
 }
 
 // startCmd represents the start command
@@ -74,9 +72,9 @@ to quickly create a Cobra application.`,
 				return
 			}
 
-			certPEM, err := issueCertificate(caCert, caKey, req)
+			certPEM, err := signCSR(caCert, caKey, req.CSR)
 			if err != nil {
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				http.Error(w, "Internal Server Error"+err.Error(), http.StatusInternalServerError)
 				return
 			}
 
@@ -151,45 +149,6 @@ func authenticate(next http.Handler) http.Handler {
 	})
 }
 
-func issueCertificate(caCert *x509.Certificate, caKey *rsa.PrivateKey, req CertRequest) ([]byte, error) {
-	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
-	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
-	if err != nil {
-		return nil, err
-	}
-
-	certTemplate := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName:   req.CommonName,
-			Organization: req.Organization,
-		},
-		NotBefore:   time.Now(),
-		NotAfter:    time.Now().AddDate(1, 0, 0), // Valid for 1 year
-		KeyUsage:    x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-
-	// Generate client private key
-	clientKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, err
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, certTemplate, caCert, &clientKey.PublicKey, caKey)
-	if err != nil {
-		return nil, err
-	}
-
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(clientKey)})
-
-	// Combine certificate and key
-	fullPEM := append(certPEM, keyPEM...)
-
-	return fullPEM, nil
-}
-
 func saveCACertificateAndKey(caCert *x509.Certificate, caKey *rsa.PrivateKey, certPath string, keyPath string) error {
 	// Encode the CA certificate to PEM format
 	caCertPEM := pem.EncodeToMemory(&pem.Block{
@@ -256,4 +215,54 @@ func loadCACertificateAndKey(certPath string, keyPath string) (*x509.Certificate
 	}
 
 	return caCert, caKey, nil
+}
+
+func signCSR(caCert *x509.Certificate, caKey *rsa.PrivateKey, csrPEM string) ([]byte, error) {
+	// Decode the CSR PEM
+	block, _ := pem.Decode([]byte(csrPEM))
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return nil, fmt.Errorf("failed to decode CSR")
+	}
+
+	// Parse the CSR
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Verify the CSR
+	err = csr.CheckSignature()
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a certificate template based on the CSR
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	certTemplate := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject:      csr.Subject,
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().AddDate(1, 0, 0), // Valid for 1 year
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		DNSNames:     csr.DNSNames,
+		IPAddresses:  csr.IPAddresses,
+		URIs:         csr.URIs,
+	}
+
+	// Sign the certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, certTemplate, caCert, csr.PublicKey, caKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// Encode the certificate to PEM format
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	return certPEM, nil
 }

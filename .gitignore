@@ -28,7 +28,7 @@ completions/
 # Exclude Mac OS X system files
 .DS_Store
 
-ca_cert.pem
-ca_key.pem
-client_cert.pem
-issued.pem
+*.pem
+*.key
+*.crt
+*.csr
